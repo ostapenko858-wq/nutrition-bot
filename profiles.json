@@ -1,0 +1,77 @@
+{
+  "841363554": {
+    "name": "Кристина",
+    "age": 29,
+    "sex": "ж",
+    "weight": 105.0,
+    "height": 171.0,
+    "goal": "Похудение",
+    "bmr": 1812.75,
+    "target_calories": 1512.75
+  },
+  "633025546": {
+    "name": "Анастасия",
+    "age": 35,
+    "sex": "ж",
+    "weight": 56.0,
+    "height": 167.0,
+    "goal": "Поддержание",
+    "bmr": 1267.75,
+    "target_calories": 1267.75,
+    "target_protein": 89.60000000000001,
+    "target_fat": 56.0,
+    "target_carbs": 101.33749999999998
+  },
+  "1023059493": {
+    "name": "Ирина",
+    "age": 41,
+    "sex": "ж",
+    "weight": 67.0,
+    "height": 174.0,
+    "goal": "Похудение",
+    "bmr": 1391.5,
+    "target_calories": 1200,
+    "target_protein": 120.60000000000001,
+    "target_fat": 53.6,
+    "target_carbs": 90.0
+  },
+  "548360815": {
+    "name": "Мари",
+    "age": 27,
+    "sex": "женский",
+    "weight": 67.0,
+    "height": 165.0,
+    "goal": "Похудение",
+    "bmr": 1405.25,
+    "target_calories": 1200,
+    "target_protein": 120.60000000000001,
+    "target_fat": 53.6,
+    "target_carbs": 90.0
+  },
+  "695309983": {
+    "name": "Настя",
+    "age": 31,
+    "sex": "ж",
+    "weight": 69.0,
+    "height": 164.0,
+    "goal": "Похудение",
+    "bmr": 1399.0,
+    "target_calories": 1200,
+    "target_protein": 124.2,
+    "target_fat": 55.2,
+    "target_carbs": 90.0
+  },
+  "1108721868": {
+    "name": "Мария",
+    "age": 43,
+    "sex": "ж",
+    "weight": 74.5,
+    "height": 170.0,
+    "goal": "Похудение",
+    "bmr": 1431.5,
+    "target_calories": 1200,
+    "target_protein": 134.1,
+    "target_fat": 59.6,
+    "target_carbs": 90.0
+  }
+}
