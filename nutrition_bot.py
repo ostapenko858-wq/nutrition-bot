@@ -1424,8 +1424,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ========= ЗАПУСК ПРИЛОЖЕНИЯ =========
 
 def main():
-    # ВАЖНО: .updater(None) отключает старый Updater, который падает
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
+    # Строим приложение (здесь всё как у тебя локально)
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset_command))
@@ -1438,20 +1438,8 @@ def main():
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
-    # ==== НАСТРОЙКА WEBHOOK ДЛЯ RENDER ====
-    port = int(os.environ.get("PORT", "8443"))
-    render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://my-nutrition-bot.onrender.com")
-    webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
-
-    logger.info(f"Стартуем webhook на порту {port}")
-    logger.info(f"Webhook URL: {render_url}{webhook_path}")
-
-    app.run_webhook(
-        listen="0.0.0.0",
-        port=port,
-        url_path=webhook_path,
-        webhook_url=render_url + webhook_path,
-    )
+    logger.info("Бот запущен (polling). Ждём сообщений...")
+    app.run_polling()
 
 
 if __name__ == "__main__":
