@@ -1424,7 +1424,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 # ========= ЗАПУСК ПРИЛОЖЕНИЯ =========
 
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    # ВАЖНО: .updater(None) отключает старый Updater, который падает
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).updater(None).build()
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("reset", reset_command))
@@ -1438,15 +1439,8 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
 
     # ==== НАСТРОЙКА WEBHOOK ДЛЯ RENDER ====
-
-    # Render прокидывает порт в переменную окружения PORT
     port = int(os.environ.get("PORT", "8443"))
-
-    # Твой внешний URL на Render (замени на свой домен)
-    # Например: https://my-nutrition-bot.onrender.com
     render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://my-nutrition-bot.onrender.com")
-
-    # Путь для вебхука — можно сделать /webhook/<token>, чтобы было уникально
     webhook_path = f"/webhook/{TELEGRAM_TOKEN}"
 
     logger.info(f"Стартуем webhook на порту {port}")
@@ -1462,4 +1456,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
