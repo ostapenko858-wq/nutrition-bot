@@ -1,12 +1,11 @@
 import os
 import io
+import json
+import base64
 import logging
 from datetime import date, timedelta
 from collections import defaultdict
 from typing import Dict, Any, List
-
-import base64
-import json
 
 from telegram import (
     Update,
@@ -24,7 +23,8 @@ from telegram.constants import ParseMode
 
 from openai import OpenAI
 
-# ========= НАСТРОЙКИ И КЛИЕНТЫ =========
+
+# =============== НАСТРОЙКИ И КЛИЕНТЫ ===============
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -42,18 +42,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ========= ПРОСТОЕ ХРАНИЛИЩЕ В ПАМЯТИ =========
+
+# =============== ХРАНИЛИЩЕ В ПАМЯТИ ===============
 
 # user_states:
 #   step
-#   pending_meal
-#   awaiting_new_day_answer
 #   active_day
-#   awaiting_history_day
+#   awaiting_new_day_answer
 #   awaiting_correction
+#   pending_meal = {"day": str, "count": int}
 user_states: Dict[int, Dict[str, Any]] = {}
 
-# анкета и цели (включая КБЖУ)
+# анкета и цели + КБЖУ
 user_profiles: Dict[int, Dict[str, Any]] = {}
 
 # user_food_log: user -> day -> [ {description, calories, protein, fat, carbs}, ... ]
@@ -61,13 +61,13 @@ user_food_log: Dict[int, Dict[str, List[Dict[str, Any]]]] = defaultdict(
     lambda: defaultdict(list)
 )
 
-# для психолога
+# история общения с коучем
 user_chat_history: Dict[int, List[Dict[str, str]]] = defaultdict(list)
 
 PROFILE_FILE = "profiles.json"
 
 
-# ========= ЗАГРУЗКА/СОХРАНЕНИЕ ПРОФИЛЕЙ =========
+# =============== ПРОФИЛИ ПОЛЬЗОВАТЕЛЕЙ ===============
 
 def load_profiles():
     global user_profiles
@@ -95,10 +95,14 @@ def save_profiles():
 load_profiles()
 
 
-# ========= ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ =========
+# =============== УТИЛИТЫ ===============
 
 def parse_float(text: str) -> float:
     return float(text.replace(",", ".").strip())
+
+
+def today_str() -> str:
+    return date.today().isoformat()
 
 
 def calculate_bmr(weight: float, height: float, age: int, sex: str) -> float:
@@ -116,37 +120,25 @@ def calculate_bmr(weight: float, height: float, age: int, sex: str) -> float:
 
 
 def infer_goal_type(current_weight: float, target_weight: float) -> str:
-    """
-    Возвращает:
-      "loss" - если цель похудеть
-      "gain" - если цель набрать
-      "maintain" - если цель примерно удержание
-    """
     diff = target_weight - current_weight
     if diff < -1:
         return "loss"
     elif diff > 1:
         return "gain"
-    else:
-        return "maintain"
+    return "maintain"
 
 
 def plan_calories_and_deficit(
     bmr: float, current_weight: float, target_weight: float, months_to_goal: float
 ) -> Dict[str, Any]:
     """
-    Планирует колораж и дефицит/профицит с учётом цели.
-    Для похудения:
-        - считаем сколько кг нужно сбросить
-        - 1 кг жира ~ 7700 ккал
-        - делим на дни, получаем нужный дефицит
-        - ограничиваем его 300–700 ккал/день
-        - если цель слишком агрессивная — считаем реалистичный срок
-    Для набора — делаем профицит 200–400 ккал/день.
-    Для удержания — дефицит 0.
+    Строим реалистичный план калорий:
+    - считаем TDEE ≈ BMR * 1.3
+    - для похудения считаем нужный дефицит, но ограничиваем 300–700 ккал/день
+    - для набора даём профицит ~300 ккал
     """
     goal_type = infer_goal_type(current_weight, target_weight)
-    maintenance = bmr * 1.3  # очень грубая оценка TDEE при низкой-умеренной активности
+    maintenance = bmr * 1.3
 
     months_to_goal = max(months_to_goal, 0.5)
     days_planned = max(int(months_to_goal * 30), 30)
@@ -157,32 +149,30 @@ def plan_calories_and_deficit(
 
     if goal_type == "loss":
         kg_to_lose = current_weight - target_weight
-        total_deficit = kg_to_lose * 7700  # ккал
+        total_deficit = kg_to_lose * 7700
         required_deficit = total_deficit / days_planned
         min_deficit = 300.0
         max_deficit = 700.0
 
         if required_deficit > max_deficit:
-            # цель слишком агрессивная, делаем максимально безопасный дефицит
             daily_deficit = max_deficit
             realistic_days = total_deficit / daily_deficit
             realistic_months = realistic_days / 30.0
             plan_comment = (
                 f"Чтобы снизить вес на ~{kg_to_lose:.1f} кг безопасно, "
-                f"тебе понадобится примерно {realistic_months:.1f} месяцев при "
+                f"понадобится примерно {realistic_months:.1f} месяцев при "
                 f"дефиците около {daily_deficit:.0f} ккал/день. "
-                f"Это больше, чем выбранные {months_to_goal:.1f} месяцев, "
-                "но так гораздо мягче и безопаснее."
+                f"Это дольше, чем выбранные {months_to_goal:.1f} месяцев, "
+                "но так мягче и здоровее."
             )
         elif required_deficit < min_deficit:
             daily_deficit = min_deficit
             realistic_days = total_deficit / daily_deficit
             realistic_months = realistic_days / 30.0
             plan_comment = (
-                f"Твоя цель довольно мягкая: чтобы уйти с {current_weight:.1f} до "
-                f"{target_weight:.1f} кг, при дефиците ~{daily_deficit:.0f} ккал/день "
-                f"понадобится примерно {realistic_months:.1f} месяцев. "
-                "Можно идти и быстрее, но так комфортнее."
+                f"Цель довольно мягкая: при дефиците ~{daily_deficit:.0f} ккал/день "
+                f"уйти с {current_weight:.1f} до {target_weight:.1f} кг займёт примерно "
+                f"{realistic_months:.1f} месяцев."
             )
         else:
             daily_deficit = required_deficit
@@ -190,17 +180,15 @@ def plan_calories_and_deficit(
             plan_comment = (
                 f"Чтобы уйти с {current_weight:.1f} до {target_weight:.1f} кг за "
                 f"{months_to_goal:.1f} месяцев, нужен дефицит примерно "
-                f"{daily_deficit:.0f} ккал/день. Это в разумных пределах."
+                f"{daily_deficit:.0f} ккал/день. Это в комфортных пределах."
             )
 
         target_calories = max(maintenance - daily_deficit, 1200.0)
 
     elif goal_type == "gain":
-        # Набор — аккуратный профицит
         kg_to_gain = target_weight - current_weight
         total_surplus = kg_to_gain * 7700
-        # делаем мягкий профицит
-        daily_deficit = -300.0  # отрицательное число = профицит
+        daily_deficit = -300.0  # профицит
         realistic_days = total_surplus / abs(daily_deficit)
         realistic_months = realistic_days / 30.0
         target_calories = maintenance + abs(daily_deficit)
@@ -209,20 +197,19 @@ def plan_calories_and_deficit(
             f"я заложу профицит около 300 ккал/день. "
             f"Это займёт примерно {realistic_months:.1f} месяцев."
         )
-    else:  # maintain
+    else:
         daily_deficit = 0.0
         target_calories = maintenance
-        realistic_months = months_to_goal
         plan_comment = (
-            "Цель по весу около текущего — будем удерживать вес вокруг этой точки "
-            "без выраженного дефицита или профицита."
+            "Цель — удержание веса примерно на текущем уровне, без выраженного "
+            "дефицита или профицита."
         )
 
     return {
         "goal_type": goal_type,
         "maintenance_calories": maintenance,
         "target_calories": target_calories,
-        "daily_deficit": daily_deficit,  # отрицательное число = профицит
+        "daily_deficit": daily_deficit,
         "realistic_months": realistic_months,
         "plan_comment": plan_comment,
     }
@@ -235,8 +222,7 @@ def calculate_macro_targets(
     goal_type: str,
 ) -> Dict[str, float]:
     """
-    Рекомендации по КБЖУ, граммы в день.
-    Для похудения и набора ориентируемся на целевой вес.
+    Рекомендации по КБЖУ (г/день).
     """
     if goal_type == "loss":
         base_w = target_weight
@@ -246,13 +232,13 @@ def calculate_macro_targets(
         base_w = target_weight
         protein_g = 2.0 * base_w
         fat_g = 1.0 * base_w
-    else:  # maintain
+    else:
         base_w = current_weight
         protein_g = 1.6 * base_w
         fat_g = 1.0 * base_w
 
-    cal_from_protein_fat = protein_g * 4 + fat_g * 9
-    carbs_cal = max(target_calories - cal_from_protein_fat, target_calories * 0.3)
+    cal_pf = protein_g * 4 + fat_g * 9
+    carbs_cal = max(target_calories - cal_pf, target_calories * 0.3)
     carbs_g = carbs_cal / 4.0
 
     return {
@@ -262,20 +248,10 @@ def calculate_macro_targets(
     }
 
 
-def today_str() -> str:
-    return date.today().isoformat()
-
-
 def is_correction_command(text: str) -> bool:
     """
-    Определяем, что пользователь хочет пересчитать/уточнить еду.
-    Реагируем на фразы типа:
-    - исправь / исправление
-    - уточни / уточнение
-    - скорректируй / корректировка
-    - поправь
-    - пересчитай
-    - ты ошибся / не то / не так
+    Фраза-поправка: "исправь", "уточни", "скорректируй", "поправь",
+    "пересчитай", "ты ошибся", "не то", "не так" и т.п.
     """
     lowered = text.strip().lower()
     keywords = [
@@ -291,54 +267,60 @@ def is_correction_command(text: str) -> bool:
     return any(kw in lowered for kw in keywords)
 
 
-# ========= OPENAI: АНАЛИЗ ФОТО ЕДЫ / ЭТИКЕТКИ =========
+def get_main_keyboard() -> ReplyKeyboardMarkup:
+    buttons = [
+        [
+            KeyboardButton("📊 Саммари за день"),
+            KeyboardButton("📜 История за день"),
+        ],
+        [
+            KeyboardButton("📆 Как я ем неделю"),
+            KeyboardButton("❓ Помощь"),
+        ],
+    ]
+    return ReplyKeyboardMarkup(buttons, resize_keyboard=True)
+
+
+# =============== OPENAI: ФОТО ЕДЫ / ЭТИКЕТКИ ===============
 
 async def analyze_food_image(image_bytes: bytes):
-    """
-    Анализирует фото еды ИЛИ фото этикетки через GPT-4.1 (vision) и возвращает:
-      description: короткое описание
-      items: список [{name, grams, calories, protein, fat, carbs}, ...]
-      total_calories, total_protein, total_fat, total_carbs
-      need_clarification: bool
-      clarification_question: str
-    """
     img_b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/jpeg;base64,{img_b64}"
 
     system_prompt = """
-Ты — ассистент-нутрициолог. Пользователь прислал фото своей еды или этикетки продукта.
+Ты — ассистент-нутрициолог. Пользователь прислал фото своей еды или фото этикетки с таблицей КБЖУ.
 
 Твоя задача:
+
 1. Определи, что на картинке:
-   - тарелка с едой / напитком
+   - тарелка с блюдом/блюдами и напитками
    - или этикетка/упаковка с таблицей КБЖУ.
-2. Если это ТАРЕЛКА / ЕДА:
-   - Определи основные блюда и напитки.
-   - Для каждого оцени примерный размер порции в граммах и калорийность.
-   - Также оцени белки, жиры, углеводы для каждого компонента.
-   - Ориентируйся на типичные значения (курица, рис, макароны, картофель, салаты, сладкие напитки и т.п.).
+
+2. Если это ТАРЕЛКА/ЕДА:
+   - Определи основные компоненты (мясо/рыба, гарнир, салат, соусы, десерты, напитки).
+   - Для каждого оцени примерный вес порции в граммах.
+   - Оцени калории, белки, жиры, углеводы.
+   - Используй реалистичные значения (не завышай и не занижай в несколько раз).
+
 3. Если это ЭТИКЕТКА:
    - Прочитай таблицу КБЖУ.
-   - Определи калории, белки, жиры, углеводы хотя бы:
-       • на 100 г/мл
-       • и, если указано, на порцию (батончик, стакан и т.п.).
-   - Если понятно, какая порция съедена (1 батончик, стандартная кружка и т.п.) —
-     оцени КБЖУ именно этой порции.
-4. Посчитай суммарную калорийность, белки, жиры, углеводы по всему тому,
-   что пользователь, скорее всего, съел/выпил.
-5. Коротко опиши, что ты видишь на фото (один абзац).
+   - Определи калории, белки, жиры, углеводы хотя бы на 100 г/мл.
+   - Если по этикетке понятно, какая порция съедена (1 батончик, 1 стакан и т.п.) — оцени КБЖУ этой порции.
+
+4. Посчитай ИТОГО:
+   - суммарные калории
+   - суммарные белки, жиры, углеводы.
+
+5. Кратко опиши по-русски, что именно на фото.
 
 Очень важно:
-— Значения калорий и КБЖУ должны быть реалистичными, без завышения/занижения в разы.
-— Если порции или состав явно неочевидны, ОБЯЗАТЕЛЬНО:
-    * установи "need_clarification": true
-    * сформулируй понятный вопрос пользователю в "clarification_question"
-      (например: "Сколько примерно грамм мяса и гарнира?" или
-      "Сколько батончиков/порций ты съел?").
-— Пользователь потом ответит на этот вопрос текстом или голосом, и по этому ответу
-  мы пересчитаем всё ещё раз.
+— Если порции или состав неочевидны, ОБЯЗАТЕЛЬНО поставь "need_clarification": true
+  и задай конкретный вопрос в "clarification_question"
+  (например: "Сколько грамм мяса и сколько гарнира примерно?" или
+   "Сколько батончиков/порций ты съел(а)?").
+— Пользователь ответит на этот вопрос текстом или голосом, и по этому описанию мы пересчитаем приём пищи.
 
-Ответ ДОЛЖЕН быть строго в формате JSON (без текста до или после):
+Ответ ДОЛЖЕН быть строго в формате JSON:
 
 {
   "description": "краткое описание по-русски",
@@ -360,7 +342,7 @@ async def analyze_food_image(image_bytes: bytes):
   "clarification_question": ""
 }
 
-Если на фото совсем нет еды и нет этикетки с КБЖУ, тогда верни:
+Если это совсем не похоже на еду и не похоже на этикетку с КБЖУ, верни:
 
 {
   "description": "на этом фото не видно еды или этикетки с КБЖУ",
@@ -383,7 +365,7 @@ async def analyze_food_image(image_bytes: bytes):
                 "content": [
                     {
                         "type": "text",
-                        "text": "Проанализируй это фото (еда или этикетка) и дай ответ строго в нужном JSON формате.",
+                        "text": "Проанализируй это фото и верни строго JSON.",
                     },
                     {
                         "type": "image_url",
@@ -393,7 +375,7 @@ async def analyze_food_image(image_bytes: bytes):
             },
         ],
         temperature=0.25,
-        max_tokens=800,
+        max_tokens=900,
     )
 
     msg_content = completion.choices[0].message.content
@@ -401,16 +383,11 @@ async def analyze_food_image(image_bytes: bytes):
     if isinstance(msg_content, str):
         raw_text = msg_content.strip()
     else:
-        texts = []
+        parts = []
         for part in msg_content:
-            try:
-                if getattr(part, "type", None) == "text":
-                    texts.append(part.text)
-                elif isinstance(part, dict) and part.get("type") == "text":
-                    texts.append(part.get("text", ""))
-            except Exception:
-                continue
-        raw_text = "\n".join(texts).strip()
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(part.get("text", ""))
+        raw_text = "\n".join(parts).strip()
 
     try:
         data = json.loads(raw_text)
@@ -434,19 +411,19 @@ async def analyze_food_image(image_bytes: bytes):
     items = []
     for item in items_raw:
         name = str(item.get("name", "Блюдо"))
-        calories = float(item.get("calories", 0) or 0)
         grams = float(item.get("grams", 0) or 0)
-        protein = float(item.get("protein", 0) or 0)
-        fat = float(item.get("fat", 0) or 0)
-        carbs = float(item.get("carbs", 0) or 0)
+        cal = float(item.get("calories", 0) or 0)
+        p = float(item.get("protein", 0) or 0)
+        f = float(item.get("fat", 0) or 0)
+        c = float(item.get("carbs", 0) or 0)
         items.append(
             {
                 "name": name,
                 "grams": grams,
-                "calories": calories,
-                "protein": protein,
-                "fat": fat,
-                "carbs": carbs,
+                "calories": cal,
+                "protein": p,
+                "fat": f,
+                "carbs": c,
             }
         )
 
@@ -471,26 +448,21 @@ async def analyze_food_image(image_bytes: bytes):
     )
 
 
-# ========= OPENAI: ПЕРЕСЧЁТ ПО ТЕКСТУ =========
+# =============== OPENAI: ТЕКСТОВОЕ ОПИСАНИЕ / ИСПРАВЛЕНИЕ ===============
 
 async def analyze_food_text(text_description: str):
-    """
-    Пользователь описывает еду текстом (исправляет бота или уточняет порции).
-    Возвращает description, items, total_calories, total_protein, total_fat, total_carbs.
-    """
     system_prompt = """
 Ты — ассистент-нутрициолог.
-Пользователь словами описывает, что именно он съел и сколько примерно по граммам или штукам.
 
-Иногда он пишет не полный список еды, а только исправление к уже распознанному фото:
-например: "ты ошибся, это была говядина 120 г и гречка 150 г, без соуса".
-Твоя задача — понять ОКОНЧАТЕЛЬНЫЙ состав приёма пищи и посчитать КБЖУ именно для него.
+Пользователь словами описывает приём пищи или исправляет распознавание с фото.
+Например: "ты ошибся, это была говядина 120 г и гречка 150 г, без соуса".
+
+Твоя задача — понять ОКОНЧАТЕЛЬНЫЙ состав приёма пищи и посчитать КБЖУ:
 
 1. Разбей описание на отдельные блюда/компоненты.
-2. Для каждого оцени массу в граммах (если явно не указана — логично предположи)
-   и калорийность, а также белки, жиры, углеводы.
-3. Посчитай суммарную калорийность и КБЖУ.
-4. Кратко опиши приём пищи.
+2. Для каждого оцени массу (граммы) и КБЖУ.
+3. Посчитай суммарные калории, белки, жиры, углеводы.
+4. Сформулируй краткое описание.
 
 Верни строго JSON:
 
@@ -520,7 +492,7 @@ async def analyze_food_text(text_description: str):
             {"role": "user", "content": text_description},
         ],
         temperature=0.25,
-        max_tokens=700,
+        max_tokens=800,
     )
 
     raw_text = completion.choices[0].message.content.strip()
@@ -545,19 +517,19 @@ async def analyze_food_text(text_description: str):
     items = []
     for item in items_raw:
         name = str(item.get("name", "Блюдо"))
-        calories = float(item.get("calories", 0) or 0)
         grams = float(item.get("grams", 0) or 0)
-        protein = float(item.get("protein", 0) or 0)
-        fat = float(item.get("fat", 0) or 0)
-        carbs = float(item.get("carbs", 0) or 0)
+        cal = float(item.get("calories", 0) or 0)
+        p = float(item.get("protein", 0) or 0)
+        f = float(item.get("fat", 0) or 0)
+        c = float(item.get("carbs", 0) or 0)
         items.append(
             {
                 "name": name,
                 "grams": grams,
-                "calories": calories,
-                "protein": protein,
-                "fat": fat,
-                "carbs": carbs,
+                "calories": cal,
+                "protein": p,
+                "fat": f,
+                "carbs": c,
             }
         )
 
@@ -573,56 +545,50 @@ async def analyze_food_text(text_description: str):
     return description, items, total_calories, total_protein, total_fat, total_carbs
 
 
-# ========= OPENAI: РАСПОЗНАВАНИЕ ГОЛОСА =========
+# =============== OPENAI: ГОЛОС (WHISPER) ===============
 
 async def transcribe_voice(voice_bytes: bytes) -> str:
     audio_file = io.BytesIO(voice_bytes)
     audio_file.name = "voice.ogg"
-
     try:
-        transcription = client.audio.transcriptions.create(
+        result = client.audio.transcriptions.create(
             model="whisper-1",
             file=audio_file,
         )
-        return (transcription.text or "").strip()
+        return (result.text or "").strip()
     except Exception as e:
         logger.exception("Ошибка при распознавании голоса: %s", e)
         return ""
 
 
-# ========= СОБЕСЕДНИК ПО ПИТАНИЮ =========
+# =============== ЧАТ КАК ПСИХОЛОГ ПО ЕДЕ ===============
 
 async def chat_with_coach(user_id: int, user_text: str) -> str:
     history = user_chat_history[user_id]
 
     system_instruction = """
-Ты — доброжелательный и поддерживающий чат-бот по питанию и психологии питания.
+Ты — доброжелательный чат-бот по питанию и психологии питания.
 
 Твоя зона:
 — привычки в еде;
-— отношения с едой;
-— эмоции вокруг питания (стресс, переедание, «сорвалась», чувство вины и т.п.);
-— мягкая поддержка здорового, НЕ экстремального подхода к питанию.
+— эмоции вокруг еды (стресс, вина, переедание, срывы);
+— мягкая поддержка без стыда и жёстких диет.
 
 Как отвечать:
-— Говори по-русски, простым и тёплым языком.
-— Не стыди и не критикуй.
-— Нормализуй: переедания и «лишние кусочки торта» иногда случаются со всеми.
-— Помогай увидеть контекст (стресс, недосып, цикл, пропуски приёмов пищи, скука и т.п.).
-— Помогай выбрать мягкий следующий шаг.
-— Не давай жёстких диет, детоксов, голодовок.
-— Не ставь диагнозов и не назначай лекарства.
-— Если говорят о самоповреждении или суициде, мягко предложи обратиться к врачу/психотерапевту и в экстренные службы.
+— простым, тёплым языком;
+— нормализуй: «сорвался» / «съела третий кусок торта» — это не катастрофа;
+— помогай видеть контекст (стресс, недосып, цикл, мало ел(а) днём, скука);
+— предлагай небольшой следующий шаг, а не идеальную диету;
+— не ставь диагнозов и не назначай лекарства;
+— если слышишь суицидальные мысли, мягко предложи обратиться к врачу и в экстренные службы.
 
-Если тебя уводят в темы вне еды/тела/эмоций вокруг питания
-(политика, техника, финансы и т.п.), вежливо верни разговор к питанию.
+Если разговор уходит в темы вне еды/тела/эмоций вокруг питания (политика, техника и т.п.),
+вежливо возвращай к теме отношений с едой.
 """
 
     messages = [{"role": "system", "content": system_instruction}]
-
-    for m in history[-10:]:
-        messages.append({"role": m["role"], "content": m["content"]})
-
+    for msg in history[-10:]:
+        messages.append(msg)
     messages.append({"role": "user", "content": user_text})
 
     completion = client.chat.completions.create(
@@ -633,7 +599,6 @@ async def chat_with_coach(user_id: int, user_text: str) -> str:
     )
 
     reply = completion.choices[0].message.content.strip()
-
     history.append({"role": "user", "content": user_text})
     history.append({"role": "assistant", "content": reply})
     user_chat_history[user_id] = history[-20:]
@@ -641,60 +606,116 @@ async def chat_with_coach(user_id: int, user_text: str) -> str:
     return reply
 
 
-# ========= ИСПРАВЛЕНИЕ / УТОЧНЕНИЕ ПОСЛЕДНЕГО ФОТО =========
+# =============== ИСТОРИЯ И САММАРИ ===============
+
+def aggregate_day(user_id: int, day: str):
+    entries = user_food_log[user_id].get(day, [])
+    total_cal = sum(e.get("calories", 0) for e in entries)
+    total_p = sum(e.get("protein", 0) for e in entries)
+    total_f = sum(e.get("fat", 0) for e in entries)
+    total_c = sum(e.get("carbs", 0) for e in entries)
+    return total_cal, total_p, total_f, total_c, entries
+
+
+async def send_day_history(update: Update, user_id: int, day: str):
+    total_cal, total_p, total_f, total_c, entries = aggregate_day(user_id, day)
+    if not entries:
+        await update.message.reply_text("За этот день пока нет записей 🍽")
+        return
+
+    lines = [f"📜 История за {day}:"]
+    for i, e in enumerate(entries, start=1):
+        lines.append(
+            f"{i}. {e['description']} — ~{round(e['calories'])} ккал, "
+            f"Б {round(e['protein'])} г, Ж {round(e['fat'])} г, У {round(e['carbs'])} г"
+        )
+
+    lines.append(
+        f"\nИтого за день: *{round(total_cal)} ккал*, "
+        f"Б *{round(total_p)} г*, Ж *{round(total_f)} г*, У *{round(total_c)} г*"
+    )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+    )
+
+
+async def week_history(update: Update, user_id: int):
+    today = date.today()
+    lines = ["📆 Как ты ел(а) за последние 7 дней:\n"]
+    profile = user_profiles.get(user_id)
+    target = profile.get("target_calories") if profile else None
+
+    for i in range(7):
+        d = (today - timedelta(days=i)).isoformat()
+        total_cal, total_p, total_f, total_c, _ = aggregate_day(user_id, d)
+        if total_cal == 0:
+            lines.append(f"{d}: нет записей")
+        else:
+            if target:
+                diff = total_cal - target
+                if abs(diff) <= target * 0.1:
+                    mark = "✅ в диапазоне"
+                elif diff < 0:
+                    mark = "⚠️ недоел(а)"
+                else:
+                    mark = "⚠️ переел(а)"
+                lines.append(f"{d}: ~{round(total_cal)} ккал ({mark})")
+            else:
+                lines.append(f"{d}: ~{round(total_cal)} ккал")
+
+    await update.message.reply_text("\n".join(lines))
+
+
+# =============== ОБРАБОТКА ИСПРАВЛЕНИЙ ПОСЛЕ ФОТО ===============
 
 async def handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
     user_id = update.effective_user.id
-    state = user_states.get(user_id, {})
+    state = user_states.setdefault(user_id, {})
     pending = state.get("pending_meal")
 
     if not pending:
         await update.message.reply_text(
             "Пока нечего пересчитывать 🙂\n"
-            "Сначала отправь фото еды или этикетки, я посчитаю, а потом можно будет уточнить или исправить."
+            "Сначала отправь фото еды или этикетки, я посчитаю, а потом можно будет уточнить."
         )
         return
 
     original = text.strip()
     lowered = original.lower()
-
-    # пробуем вырезать слово-триггер, если оно есть
     clean_text = original
+
     for kw in ["исправ", "уточн", "скоррект", "поправ", "пересчит", "не то", "не так", "ошиб"]:
         idx = lowered.find(kw)
         if idx != -1:
             clean_text = original[idx + len(kw):].strip()
             break
 
-    # если ещё есть двоеточие — убираем всё до него
     if ":" in clean_text:
         _, _, clean_text = clean_text.partition(":")
         clean_text = clean_text.strip()
 
     if not clean_text:
         await update.message.reply_text(
-            "Опиши, пожалуйста, словами, что именно было в тарелке/порции — например:\n"
-            "«там была гречка 150 г, говядина 120 г и салат из огурцов без масла»."
+            "Опиши, пожалуйста, словами, что именно было в тарелке или порции — "
+            "например: «гречка 150 г, говядина 120 г, салат без масла»."
         )
         return
 
     try:
-        description, items, total_cal, total_p, total_f, total_c = await analyze_food_text(clean_text)
+        desc, items, total_cal, total_p, total_f, total_c = await analyze_food_text(clean_text)
     except Exception as e:
         logger.exception("Ошибка при пересчёте по тексту: %s", e)
-        await update.message.reply_text(
-            f"Не получилось пересчитать по описанию 😔\n"
-            f"Ошибка OpenAI: {e}"
-        )
+        await update.message.reply_text(f"Не получилось пересчитать: {e}")
         return
 
     day = pending["day"]
-    count = pending["count"]
+    old_count = pending["count"]
     entries = user_food_log[user_id][day]
 
-    # удаляем старые записи, связанные с этим фото
-    if count > 0 and len(entries) >= count:
-        del entries[-count:]
+    if old_count > 0 and len(entries) >= old_count:
+        del entries[-old_count:]
 
     before_len = len(entries)
     for item in items:
@@ -707,117 +728,377 @@ async def handle_correction(update: Update, context: ContextTypes.DEFAULT_TYPE, 
                 "carbs": float(item.get("carbs", 0) or 0),
             }
         )
-    added_count = len(entries) - before_len
+    added = len(entries) - before_len
+    state["pending_meal"] = {"day": day, "count": added}
+    state["awaiting_correction"] = False
 
-    state["pending_meal"] = {"day": day, "count": added_count}
-    user_states[user_id] = state
+    lines = ["Окей, пересчитаем так:\n"]
+    if desc:
+        lines.append(f"📋 {desc}\n")
 
-    lines = []
-    lines.append("Хорошо, давай считать так:\n")
-
-    if description:
-        lines.append(f"📋 {description}\n")
-
-    if items:
-        for item in items:
-            name = item.get("name", "Блюдо")
-            grams = item.get("grams", 0)
-            cal = item.get("calories", 0)
-            p = item.get("protein", 0)
-            f = item.get("fat", 0)
-            c = item.get("carbs", 0)
-            if grams:
-                lines.append(
-                    f"• {name} — ~{round(grams)} г, "
-                    f"~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
-                )
-            else:
-                lines.append(
-                    f"• {name} — ~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
-                )
-        lines.append(
-            f"\n🔢 Примерно всего: *{round(total_cal)} ккал*, "
-            f"Б *{round(total_p)} г*, Ж *{round(total_f)} г*, У *{round(total_c)} г*"
-        )
-    else:
-        lines.append("Не смогла распознать блюда по описанию 😔")
+    for item in items:
+        name = item.get("name", "Блюдо")
+        grams = item.get("grams", 0)
+        cal = item.get("calories", 0)
+        p = item.get("protein", 0)
+        f = item.get("fat", 0)
+        c = item.get("carbs", 0)
+        if grams:
+            lines.append(
+                f"• {name} — ~{round(grams)} г, "
+                f"~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
+            )
+        else:
+            lines.append(
+                f"• {name} — ~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
+            )
 
     lines.append(
-        "\nЯ обновила записи за этот день с учётом этого уточнения/исправления."
+        f"\nИтого: *{round(total_cal)} ккал*, "
+        f"Б *{round(total_p)} г*, Ж *{round(total_f)} г*, У *{round(total_c)} г*"
+    )
+    lines.append("\nЯ обновила записи за этот день с учётом этих правок.")
+
+    await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.MARKDOWN)
+
+
+# =============== КОМАНДЫ БОТА ===============
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = user.id
+    state = user_states.setdefault(user_id, {})
+    state.setdefault("active_day", today_str())
+
+    profile = user_profiles.get(user_id)
+    if not profile:
+        state["step"] = "ask_name"
+        await update.message.reply_text(
+            "Привет! Я нутри-бот, который поможет отслеживать питание и цели по весу 🥦\n\n"
+            "Давай познакомимся и настроим тебя. Как тебя зовут?",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    # У пользователя уже есть профиль — покажем его цели
+    target_cal = profile.get("target_calories")
+    tp = profile.get("target_protein")
+    tf = profile.get("target_fat")
+    tc = profile.get("target_carbs")
+
+    text = [
+        f"Снова привет, {profile.get('name', 'друг')} 👋",
+        "Я помню твои настройки:",
+    ]
+    if target_cal:
+        text.append(f"• Целевой колораж: ~{round(target_cal)} ккал/день")
+    if tp and tf and tc:
+        text.append(
+            f"• Белки: ~{round(tp)} г, жиры: ~{round(tf)} г, углеводы: ~{round(tc)} г в день"
+        )
+    text.append(
+        "\nПросто присылай мне фото еды или этикетки — я посчитаю примерные калории и КБЖУ.\n"
+        "Если я ошибусь, сразу после фото напиши или наговори голосом, что именно ты съел(а) — я пересчитаю."
+    )
+
+    await update.message.reply_text(
+        "\n".join(text),
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Что я умею:\n"
+        "• Запросить у тебя данные (имя, возраст, вес, рост, цель по весу и срок) и посчитать BMR.\n"
+        "• На основе BMR и цели дать реалистичный план калорий и КБЖУ.\n"
+        "• По фото еды или этикетки считать калории и КБЖУ.\n"
+        "• Если я неправильно распознал еду — просто напиши или скажи голосом, что на тарелке, "
+        "и я пересчитаю.\n"
+        "• Вести историю за день и неделю.\n"
+        "• Быть собеседником про отношения с едой и эмоциональное переедание.\n\n"
+        "Полезные команды:\n"
+        "/start — начать или показать настройки\n"
+        "/summary — итог за день\n"
+        "/week — как ты ешь неделю\n"
+        "/reset — сбросить настройки и историю для этого чата.",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_states.pop(user_id, None)
+    user_food_log.pop(user_id, None)
+    user_chat_history.pop(user_id, None)
+    user_profiles.pop(user_id, None)
+    save_profiles()
+    await update.message.reply_text(
+        "Я всё про тебя забыла в этом чате: анкета, цели и история еды очищены 🔄\n"
+        "Можно начать заново с /start.",
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = user_states.setdefault(user_id, {})
+    day = state.get("active_day", today_str())
+    total_cal, total_p, total_f, total_c, entries = aggregate_day(user_id, day)
+
+    if not entries:
+        await update.message.reply_text(
+            "За этот день у тебя пока нет записей 🍽\n"
+            "Отправляй фото еды или этикетки, и я начну считать.",
+            reply_markup=get_main_keyboard(),
+        )
+        return
+
+    profile = user_profiles.get(user_id)
+    target_cal = profile.get("target_calories") if profile else None
+    tp = profile.get("target_protein") if profile else None
+    tf = profile.get("target_fat") if profile else None
+    tc = profile.get("target_carbs") if profile else None
+
+    lines = [f"📊 Итоги за {day}:\n"]
+    lines.append(
+        f"Калории: *{round(total_cal)} ккал*"
+        + (f" из целевых ~{round(target_cal)}" if target_cal else "")
+    )
+    if tp and tf and tc:
+        lines.append(
+            f"Белки: *{round(total_p)} г* / цель ~{round(tp)} г\n"
+            f"Жиры: *{round(total_f)} г* / цель ~{round(tf)} г\n"
+            f"Углеводы: *{round(total_c)} г* / цель ~{round(tc)} г"
+        )
+    else:
+        lines.append(
+            f"Б: *{round(total_p)} г*, Ж: *{round(total_f)} г*, У: *{round(total_c)} г*"
+        )
+
+    if target_cal:
+        diff = total_cal - target_cal
+        if abs(diff) <= target_cal * 0.1:
+            comment = "Ты молодец, сегодня ты примерно в своём диапазоне ✅"
+        elif diff < 0:
+            comment = (
+                "Сегодня ты недоел(а) по сравнению с целевым колоражем. "
+                "Иногда так бывает, но смотри, чтобы это не превращалось в жёсткое ограничение 💛"
+            )
+        else:
+            comment = (
+                "Сегодня ты вышел(ла) за пределы целевого колоража. "
+                "Это не катастрофа, давай просто посмотрим, что могло повлиять: стресс, "
+                "мало ел(а) днём, усталость, цикл и т.п."
+            )
+        lines.append("\n" + comment)
+
+    lines.append(
+        "\nИ помни: к цифрам дня можно добавить ещё 200–300 ккал на возможную погрешность."
     )
 
     await update.message.reply_text(
         "\n".join(lines),
         parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_keyboard(),
     )
 
 
-# ========= ИСТОРИЯ ЗА ДЕНЬ / НЕДЕЛЮ (без изменений логики) =========
-# ... (оставляем те же send_day_history, week_history, day_history_command,
-# week_history_command, что были у тебя в рабочей версии — они
-# не зависят от новых расчётов и моделей)
-
-# Чтобы не раздувать ответ ещё сильнее:
-# представь, что здесь идут ТВОИ же функции send_day_history, week_history,
-# week_history_command, day_history_command — их можно оставить без изменений.
-
-
-# ========= ОБРАБОТКА ТЕКСТА И НОВЫЙ ОПРОС =========
-
-async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str):
+async def day_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    state = user_states.setdefault(user_id, {"step": None})
+    state = user_states.setdefault(user_id, {})
+    day = state.get("active_day", today_str())
+    await send_day_history(update, user_id, day)
+
+
+async def week_history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await week_history(update, user_id)
+
+
+# =============== ОБРАБОТКА ФОТО / ГОЛОСА / ТЕКСТА ===============
+
+async def photo_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = user_states.setdefault(user_id, {})
+    day = state.setdefault("active_day", today_str())
+
+    try:
+        photo = update.message.photo[-1]
+        file = await photo.get_file()
+        img_bytes = await file.download_as_bytearray()
+    except Exception as e:
+        logger.exception("Ошибка загрузки фото: %s", e)
+        await update.message.reply_text("Не получилось скачать фото 😔 Попробуй ещё раз.")
+        return
+
+    try:
+        (
+            desc,
+            items,
+            total_cal,
+            total_p,
+            total_f,
+            total_c,
+            need_clar,
+            clar_q,
+        ) = await analyze_food_image(bytes(img_bytes))
+    except Exception as e:
+        logger.exception("Ошибка анализа фото: %s", e)
+        await update.message.reply_text(
+            f"Что-то пошло не так при анализе фото 😔\nОшибка OpenAI: {e}"
+        )
+        return
+
+    if not items:
+        await update.message.reply_text(
+            "Я не вижу на этом фото еды или читаемой этикетки с КБЖУ 😔\n"
+            "Попробуй сделать снимок ближе или при лучшем освещении."
+        )
+        return
+
+    entries = user_food_log[user_id][day]
+    for item in items:
+        entries.append(
+            {
+                "description": item.get("name", "Блюдо"),
+                "calories": float(item.get("calories", 0) or 0),
+                "protein": float(item.get("protein", 0) or 0),
+                "fat": float(item.get("fat", 0) or 0),
+                "carbs": float(item.get("carbs", 0) or 0),
+            }
+        )
+
+    state["pending_meal"] = {"day": day, "count": len(items)}
+    state["awaiting_correction"] = True
+
+    lines = []
+    if desc:
+        lines.append(f"📷 Я вижу: {desc}\n")
+    else:
+        lines.append("📷 Я распознала несколько компонентов:\n")
+
+    for item in items:
+        name = item.get("name", "Блюдо")
+        grams = item.get("grams", 0)
+        cal = item.get("calories", 0)
+        p = item.get("protein", 0)
+        f = item.get("fat", 0)
+        c = item.get("carbs", 0)
+        if grams:
+            lines.append(
+                f"• {name} — ~{round(grams)} г, "
+                f"~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
+            )
+        else:
+            lines.append(
+                f"• {name} — ~{round(cal)} ккал, Б {round(p)} г, Ж {round(f)} г, У {round(c)} г"
+            )
+
+    lines.append(
+        f"\nИтого по этому фото: *{round(total_cal)} ккал*, "
+        f"Б *{round(total_p)} г*, Ж *{round(total_f)} г*, У *{round(total_c)} г*"
+    )
+
+    if need_clar and clar_q:
+        lines.append(
+            "\nМне нужно чуть больше инфы, чтобы посчитать точнее:\n"
+            f"❓ {clar_q}\n\n"
+            "Просто ответь на этот вопрос текстом или голосом — я пересчитаю приём пищи."
+        )
+    else:
+        lines.append(
+            "\nЕсли хочешь что-то поправить или уточнить (например, другой продукт или граммовка) — "
+            "просто в следующем сообщении опиши словами, что именно было в тарелке. "
+            "Я пересчитаю."
+        )
+
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=get_main_keyboard(),
+    )
+
+
+async def voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        voice = update.message.voice or update.message.audio
+        file = await voice.get_file()
+        voice_bytes = await file.download_as_bytearray()
+    except Exception as e:
+        logger.exception("Ошибка загрузки аудио: %s", e)
+        await update.message.reply_text("Не получилось скачать голосовое 😔 Попробуй ещё раз.")
+        return
+
+    text = await transcribe_voice(bytes(voice_bytes))
+    if not text:
+        await update.message.reply_text(
+            "Не смогла распознать голос 😔 Попробуй сказать чуть чётче или короче."
+        )
+        return
+
+    await text_message(update, context, forced_text=text)
+
+
+async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, forced_text: str = None):
+    user_id = update.effective_user.id
+    text = forced_text if forced_text is not None else (update.message.text or "").strip()
+    if not text:
+        return
+
+    state = user_states.setdefault(user_id, {})
     step = state.get("step")
-    lowered = text.strip().lower()
 
-    # если ждём ответ "новый день?"
-    if state.get("awaiting_new_day_answer"):
-        if lowered.startswith("да"):
-            new_day = today_str()
-            state["active_day"] = new_day
-            state["awaiting_new_day_answer"] = False
-            await update.message.reply_text(
-                "Окей, считаем, что начался новый день 🌞\n"
-                "Теперь следующий приём пищи я буду записывать как новый день."
-            )
-            return
-        elif lowered.startswith("нет"):
-            state["awaiting_new_day_answer"] = False
-            await update.message.reply_text(
-                "Хорошо, продолжаем считать, что это тот же день 🌙"
-            )
-            return
+    lowered = text.lower()
 
-    # если ждём дату для истории — логика как была, опускаю тут ради длины
+    # кнопки
+    if text == "📊 Саммари за день":
+        await summary(update, context)
+        return
+    if text == "📜 История за день":
+        await day_history_command(update, context)
+        return
+    if text == "📆 Как я ем неделю":
+        await week_history_command(update, context)
+        return
+    if text == "❓ Помощь":
+        await help_command(update, context)
+        return
 
-    # ===== коррекция после фото =====
+    # если ждём подтверждение "новый день?" — можно добавить логику,
+    # но чтобы не усложнять, сейчас игнорируем это и считаем всегда один активный день
+
+    # если ждём коррекцию после фото
     if state.get("awaiting_correction") and state.get("pending_meal"):
-        # любое следующее сообщение после фото считаем уточнением/исправлением
-        state["awaiting_correction"] = False
         await handle_correction(update, context, text)
         return
 
-    # ЯВНЫЕ фразы "исправь/уточни/скорректируй..."
+    # явные фразы исправления
     if is_correction_command(text):
         await handle_correction(update, context, text)
         return
 
-    # ===== если ещё нет профиля =====
-    if step is None and user_id not in user_profiles:
+    profile = user_profiles.get(user_id)
+
+    # ===== анкетирование =====
+    if step is None and profile is None:
+        # если пользователь не нажал /start, но пишет — запускаем анкету
+        state["step"] = "ask_name"
         await update.message.reply_text(
-            "Я пока с тобой не знаком 😅\n"
-            "Нажми /start, чтобы пройти короткую анкету с расчётом BMR и цели по весу."
+            "Давай сначала познакомимся: как тебя зовут?",
+            reply_markup=get_main_keyboard(),
         )
         return
 
-    # ===== новая анкета =====
     if step == "ask_name":
         name = text.strip()
         user_profiles[user_id] = {"name": name}
         save_profiles()
         state["step"] = "ask_age"
         await update.message.reply_text(
-            f"Рада знакомству, {name}! 🎉\nСколько тебе полных лет?"
+            f"Рада знакомству, {name}! 🎉 Сколько тебе полных лет?",
+            reply_markup=get_main_keyboard(),
         )
         return
 
@@ -831,27 +1112,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
                 "Возраст должен быть целым числом (например, 28). Попробуй ещё раз 🙂"
             )
             return
-
         user_profiles[user_id]["age"] = age
         save_profiles()
         state["step"] = "ask_sex"
         await update.message.reply_text(
-            "Укажи, пожалуйста, пол (м/ж). Это нужно для более точного расчёта метаболизма."
+            "Укажи, пожалуйста, пол (м/ж). Это нужно для формулы BMR."
         )
         return
 
     if step == "ask_sex":
         sex = text.strip().lower()
         if not (sex.startswith("м") or sex.startswith("ж")):
-            await update.message.reply_text(
-                "Напиши, пожалуйста, просто 'м' или 'ж' 🙂"
-            )
+            await update.message.reply_text("Напиши, пожалуйста, просто 'м' или 'ж' 🙂")
             return
         user_profiles[user_id]["sex"] = sex
         save_profiles()
         state["step"] = "ask_weight"
         await update.message.reply_text(
-            "Отлично!\nТеперь напиши свой ТЕКУЩИЙ вес в килограммах (например, 70.5)."
+            "Теперь напиши свой текущий вес в килограммах (например, 70.5)."
         )
         return
 
@@ -865,12 +1143,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
                 "Вес должен быть числом в килограммах (например, 68 или 68.5). Попробуй ещё раз."
             )
             return
-
         user_profiles[user_id]["weight"] = weight
         save_profiles()
         state["step"] = "ask_height"
         await update.message.reply_text(
-            "Принято 👍\nТеперь укажи рост в сантиметрах (например, 170)."
+            "Отлично! Теперь напиши рост в сантиметрах (например, 170)."
         )
         return
 
@@ -884,13 +1161,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
                 "Рост должен быть числом в сантиметрах (например, 165). Попробуй ещё раз."
             )
             return
-
         user_profiles[user_id]["height"] = height
         save_profiles()
         state["step"] = "ask_target_weight"
         await update.message.reply_text(
-            "Теперь скажи, до какого веса ты бы хотела/хотел прийти? (в килограммах)\n"
-            "Например: 60"
+            "До какого веса ты хочешь прийти? Напиши число в килограммах (например, 60)."
         )
         return
 
@@ -904,13 +1179,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
                 "Целевой вес тоже должен быть числом в килограммах 🙂 Попробуй ещё раз."
             )
             return
-
         user_profiles[user_id]["target_weight"] = target_weight
         save_profiles()
         state["step"] = "ask_months_to_goal"
         await update.message.reply_text(
-            "За сколько МЕСЯЦЕВ примерно ты хотела/хотел бы прийти к этому весу?\n"
-            "Например: 6"
+            "За сколько МЕСЯЦЕВ ты бы хотела/хотел прийти к этому весу? Например: 6."
         )
         return
 
@@ -928,7 +1201,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         profile = user_profiles[user_id]
         profile["months_to_goal"] = months
 
-        # ---- расчёты BMR и плана ----
         bmr = calculate_bmr(
             weight=profile["weight"],
             height=profile["height"],
@@ -941,7 +1213,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             target_weight=profile["target_weight"],
             months_to_goal=months,
         )
-
         goal_type = plan["goal_type"]
         maintenance = plan["maintenance_calories"]
         target_cal = plan["target_calories"]
@@ -949,7 +1220,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         realistic_months = plan["realistic_months"]
         plan_comment = plan["plan_comment"]
 
-        macro_targets = calculate_macro_targets(
+        macros = calculate_macro_targets(
             current_weight=profile["weight"],
             target_weight=profile["target_weight"],
             target_calories=target_cal,
@@ -962,15 +1233,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
         profile["target_calories"] = target_cal
         profile["daily_deficit"] = daily_def
         profile["realistic_months"] = realistic_months
-        profile.update(macro_targets)
+        profile.update(macros)
         save_profiles()
 
         state["step"] = None
         state.setdefault("active_day", today_str())
-
-        tp = macro_targets["target_protein"]
-        tf = macro_targets["target_fat"]
-        tc = macro_targets["target_carbs"]
 
         goal_text = {
             "loss": "похудение",
@@ -978,19 +1245,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             "maintain": "удержание веса",
         }[goal_type]
 
+        tp = macros["target_protein"]
+        tf = macros["target_fat"]
+        tc = macros["target_carbs"]
+
         deficit_line = ""
         if goal_type == "loss":
             deficit_line = f"Ориентировочный дефицит: ~{abs(round(daily_def))} ккал/день."
         elif goal_type == "gain":
             deficit_line = f"Ориентировочный профицит: ~{abs(round(daily_def))} ккал/день."
 
-        await update.message.reply_text(
-            "Готово! Вот твоя персональная схема 🔍\n\n"
-            f"🧮 Формула BMR (Миффлин–Сан Жеор):\n"
-            f"*BMR = 10×вес + 6.25×рост − 5×возраст + s*, где s = 5 для мужчин и −161 для женщин.\n\n"
-            f"С твоими данными BMR ≈ *{round(bmr)} ккал/день* — это энергия на жизнь в покое.\n\n"
-            f"Примерный расход с учётом повседневной активности (TDEE ≈ BMR × 1.3):\n"
-            f"*~{round(maintenance)} ккал/день*.\n\n"
+        text_out = (
+            "Готово! Вот твоя схема 👇\n\n"
+            "🧮 Формула BMR (Миффлин–Сан Жеор):\n"
+            "*BMR = 10×вес + 6.25×рост − 5×возраст + s*, где s = 5 для мужчин и −161 для женщин.\n\n"
+            f"С твоими данными BMR ≈ *{round(bmr)} ккал/день* — это «энергия в покое».\n\n"
+            f"Оценочный расход с обычной активностью (BMR × 1.3) ≈ *{round(maintenance)} ккал/день*.\n\n"
             f"Текущий вес: *{profile['weight']} кг*\n"
             f"Целевой вес: *{profile['target_weight']} кг*\n"
             f"Тип цели: *{goal_text}*\n\n"
@@ -1001,52 +1271,47 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE, text: 
             f"🥩 Белки: *~{round(tp)} г*\n"
             f"🧈 Жиры: *~{round(tf)} г*\n"
             f"🥔 Углеводы: *~{round(tc)} г*\n\n"
-            "Теперь ты можешь отправлять мне *фото еды или этикеток*, а я буду считать "
-            "примерные калории и КБЖУ.\n"
-            "После фото можешь одним сообщением голосом или текстом описать приём пищи "
-            "или поправить меня — я пересчитаю.\n\n"
-            "‼️ Важно: в конце дня добавляй к итогам ещё *200–300 ккал* на возможную погрешность."
-            ,
+            "Дальше просто присылай мне фото еды или этикеток. "
+            "Если я опишу тарелку не совсем точно — в следующем сообщении голосом или текстом "
+            "скажи, что именно ты съел(а), и я пересчитаю.\n\n"
+            "И помни рекомендацию: сверху к итогам дня полезно добавлять ещё 200–300 ккал на возможную погрешность."
+        )
+
+        await update.message.reply_text(
+            text_out,
             parse_mode=ParseMode.MARKDOWN,
+            reply_markup=get_main_keyboard(),
         )
         return
 
-    # ===== дальше — уже знакомый пользователь =====
-    # здесь оставляем твою логику: история за день, неделя, /summary, чат-коуч и т.п.
-    # + если текст не попадает ни в одну команду — отправляем в chat_with_coach
-
+    # ===== обычный текст: чат-коуч =====
     try:
         reply = await chat_with_coach(user_id, text)
-        await update.message.reply_text(reply)
+        await update.message.reply_text(
+            reply,
+            reply_markup=get_main_keyboard(),
+        )
     except Exception as e:
         logger.exception("Ошибка в чат-коуче: %s", e)
         await update.message.reply_text(f"Ошибка OpenAI в чате: {e}")
 
 
-# ========= START / RESET, ОБРАБОТКА ФОТО/ГОЛОСА, SUMMARY =========
-# Здесь можно оставить твой рабочий код, только добавить:
-#  - в photo_message после успешного анализа:
-#       state["pending_meal"] = {...}
-#       state["awaiting_correction"] = True
-#  - в сообщении к пользователю текст типа:
-#       "Если хочешь уточнить или исправить, просто в следующем сообщении
-#        опиши словами, что именно ты ел(а) — я пересчитаю."
-
-
-# В самом конце — обычный main() с polling:
+# =============== MAIN ===============
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("reset", reset_command))
     app.add_handler(CommandHandler("summary", summary))
-    app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("week", week_history_command))
     app.add_handler(CommandHandler("dayhistory", day_history_command))
+
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
+
     logger.info("Бот запущен (polling). Ждём сообщений...")
     app.run_polling()
 
