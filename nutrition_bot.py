@@ -1044,11 +1044,9 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("week", week_history_command))
     app.add_handler(CommandHandler("dayhistory", day_history_command))
-
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_message))
-
     logger.info("Бот запущен (polling). Ждём сообщений...")
     app.run_polling()
 
