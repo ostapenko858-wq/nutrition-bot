@@ -63,6 +63,9 @@ user_food_log: Dict[int, Dict[str, List[Dict[str, Any]]]] = defaultdict(
 # история общения с коучем
 user_chat_history: Dict[int, List[Dict[str, str]]] = defaultdict(list)
 
+# трекер воды: user -> day -> ml
+user_water_log: Dict[int, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
 PROFILE_FILE = "profiles.json"
 
 
@@ -385,7 +388,7 @@ async def analyze_food_image(image_bytes: bytes):
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},
             {
@@ -578,7 +581,7 @@ async def analyze_food_text(text_description: str, base_items: Optional[List[Dic
 """
 
     completion = client.chat.completions.create(
-        model="gpt-4.1",
+        model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -941,16 +944,32 @@ async def reset_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def water_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    state = user_states.setdefault(user_id, {})
+    day = state.get("active_day", today_str())
+    
+    try:
+        if context.args:
+            ml = int(context.args[0])
+            user_water_log[user_id][day] += ml
+            await update.message.reply_text(f"💧 Добавлено {ml} мл воды. Итого за сегодня: {user_water_log[user_id][day]} мл.")
+        else:
+            await update.message.reply_text("Используй: /water [количество в мл], например: /water 250")
+    except ValueError:
+        await update.message.reply_text("Пожалуйста, укажите количество воды числом.")
+
 async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     state = user_states.setdefault(user_id, {})
     day = state.get("active_day", today_str())
     total_cal, total_p, total_f, total_c, entries = aggregate_day(user_id, day)
+    water = user_water_log[user_id].get(day, 0)
 
-    if not entries:
+    if not entries and water == 0:
         await update.message.reply_text(
             "За этот день у тебя пока нет записей 🍽\n"
-            "Отправляй фото еды или этикетки, и я начну считать.",
+            "Отправляй фото еды, этикетки или лог воды (/water 250).",
             reply_markup=get_main_keyboard(),
         )
         return
@@ -970,12 +989,14 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append(
             f"Белки: *{round(total_p)} г* / цель ~{round(tp)} г\n"
             f"Жиры: *{round(total_f)} г* / цель ~{round(tf)} г\n"
-            f"Углеводы: *{round(total_c)} г* / цель ~{round(tc)} г"
+            f"Углеводы: *{round(total_carbs)} г* / цель ~{round(tc)} г"
         )
     else:
         lines.append(
             f"Б: *{round(total_p)} г*, Ж: *{round(total_f)} г*, У: *{round(total_c)} г*"
         )
+    
+    lines.append(f"💧 Вода: *{water} мл*")
 
     if target_cal:
         diff = total_cal - target_cal
@@ -1301,6 +1322,36 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, force
             return
         user_profiles[user_id]["target_weight"] = target_weight
         save_profiles()
+        state["step"] = "ask_health"
+        await update.message.reply_text(
+            "Есть ли у тебя какие-то особенности здоровья? (например: диабет, гастрит, инсулинорезистентность)\n"
+            "Если нет, просто напиши 'нет'."
+        )
+        return
+
+    if step == "ask_health":
+        user_profiles[user_id]["health_conditions"] = text.strip()
+        save_profiles()
+        state["step"] = "ask_allergies"
+        await update.message.reply_text(
+            "Есть ли у тебя пищевые аллергии или непереносимости? (например: лактоза, глютен, орехи)\n"
+            "Если нет, напиши 'нет'."
+        )
+        return
+
+    if step == "ask_allergies":
+        user_profiles[user_id]["allergies"] = text.strip()
+        save_profiles()
+        state["step"] = "ask_lifestyle"
+        await update.message.reply_text(
+            "Как у тебя со сном и уровнем стресса? (например: сплю 6ч, много стресса)\n"
+            "Это поможет мне давать более точные советы."
+        )
+        return
+
+    if step == "ask_lifestyle":
+        user_profiles[user_id]["lifestyle"] = text.strip()
+        save_profiles()
         state["step"] = "ask_months_to_goal"
         await update.message.reply_text(
             "За сколько МЕСЯЦЕВ ты бы хотела/хотел прийти к этому весу? Например: 6."
@@ -1371,6 +1422,8 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, force
         tf = macros["target_fat"]
         tc = macros["target_carbs"]
         activity_desc = profile.get("activity_description", "")
+        health = profile.get("health_conditions", "нет")
+        allergies = profile.get("allergies", "нет")
 
         deficit_line = ""
         if goal_type == "loss":
@@ -1379,26 +1432,24 @@ async def text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, force
             deficit_line = f"Ориентировочный профицит: ~{abs(round(daily_def))} ккал/день."
 
         text_out = (
-            "Готово! Вот твоя схема 👇\n\n"
-            "🧮 Формула BMR (Миффлин–Сан Жеор):\n"
-            "*BMR = 10×вес + 6.25×рост − 5×возраст + s*, где s = 5 для мужчин и −161 для женщин.\n\n"
-            f"С твоими данными BMR ≈ *{round(bmr)} ккал/день* — это «энергия в покое».\n\n"
-            f"Уровень активности: {activity_desc}\n"
-            f"Оценочный расход с учётом активности (BMR × {activity_factor:.3g}) ≈ *{round(maintenance)} ккал/день*.\n\n"
-            f"Текущий вес: *{profile['weight']} кг*\n"
-            f"Целевой вес: *{profile['target_weight']} кг*\n"
-            f"Тип цели: *{goal_text}*\n\n"
-            f"Целевой колораж на день: *~{round(target_cal)} ккал/день*.\n"
-            f"{deficit_line}\n\n"
+            "🎯 Твой профессиональный план готов!\n\n"
+            "🧮 *Расчеты (Миффлин–Сан Жеор):*\n"
+            f"• Базовый метаболизм (BMR): *{round(bmr)} ккал*\n"
+            f"• Расход с активностью: *{round(maintenance)} ккал*\n\n"
+            "📊 *Твои данные и цель:*\n"
+            f"• Вес: {profile['weight']} ➔ {profile['target_weight']} кг\n"
+            f"• Цель: {goal_text}\n"
+            f"• Здоровье: {health}\n"
+            f"• Аллергии: {allergies}\n\n"
+            "🍎 *Целевое БЖУ на день:*\n"
+            f"• Калории: *~{round(target_cal)} ккал*\n"
+            f"• Белки: *~{round(tp)} г*\n"
+            f"• Жиры: *~{round(tf)} г*\n"
+            f"• Углеводы: *~{round(tc)} г*\n\n"
+            f"💡 {deficit_line}\n"
             f"{plan_comment}\n\n"
-            "Рекомендации по КБЖУ на день:\n"
-            f"🥩 Белки: *~{round(tp)} г*\n"
-            f"🧈 Жиры: *~{round(tf)} г*\n"
-            f"🥔 Углеводы: *~{round(tc)} г*\n\n"
-            "Дальше просто присылай мне фото еды или этикеток. "
-            "Если я опишу тарелку не совсем точно — в следующем сообщении голосом или текстом "
-            "скажи, что именно ты съел(а) (добавь, убери или исправь продукты), и я пересчитаю.\n\n"
-            "И помни: к итогам дня полезно добавлять ещё 200–300 ккал на возможную погрешность."
+            "🚀 Теперь просто присылай фото еды, этикеток или пиши /water [мл].\n"
+            "Я буду следить за твоим прогрессом как настоящий диетолог!"
         )
 
         await update.message.reply_text(
@@ -1438,6 +1489,7 @@ def main():
     app.add_handler(CommandHandler("summary", summary))
     app.add_handler(CommandHandler("week", week_history_command))
     app.add_handler(CommandHandler("dayhistory", day_history_command))
+    app.add_handler(CommandHandler("water", water_command))
 
     app.add_handler(MessageHandler(filters.PHOTO, photo_message))
     app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, voice_message))
