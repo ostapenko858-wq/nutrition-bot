@@ -1,0 +1,9 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+bot_storage.json
+*.tmp
+bin/
+webapp_server.py
+

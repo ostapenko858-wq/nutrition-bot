@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>Ам-Ам • Дневник питания</title>
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    :root {
+      --bg-color: var(--tg-theme-bg-color, #0f172a);
+      --text-color: var(--tg-theme-text-color, #f8fafc);
+      --hint-color: var(--tg-theme-hint-color, #94a3b8);
+      --card-bg: #1e293b;
+      --card-border: #334155;
+      --accent: #10b981;
+    }
+    body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .ring-bg { stroke: #1e293b; }
+    .ring-cal { stroke: #10b981; transition: stroke-dashoffset 0.8s ease-in-out; }
+    .ring-protein { stroke: #38bdf8; transition: stroke-dashoffset 0.8s ease-in-out; }
+    .ring-fat { stroke: #fbbf24; transition: stroke-dashoffset 0.8s ease-in-out; }
+    .ring-carbs { stroke: #c084fc; transition: stroke-dashoffset 0.8s ease-in-out; }
+    .glass-card {
+      background: rgba(30, 41, 59, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(51, 65, 85, 0.7);
+    }
+  </style>
+</head>
+<body class="p-4 pb-24 select-none">
+  <!-- Хедер -->
+  <header class="flex items-center justify-between mb-5">
+    <div>
+      <p class="text-xs uppercase tracking-wider text-slate-400 font-semibold" id="current-date">Сегодня</p>
+      <h1 class="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
+        <span id="user-greeting">Привет!</span> 🥦
+      </h1>
+    </div>
+    <div class="flex items-center gap-2">
+      <span class="px-3 py-1 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+        Demo Pro
+      </span>
+    </div>
+  </header>
+
+  <!-- Главное кольцо активности: Калории & БЖУ -->
+  <div class="glass-card rounded-3xl p-5 mb-5 shadow-xl relative overflow-hidden">
+    <div class="flex items-center justify-between mb-2">
+      <span class="text-xs uppercase tracking-wider font-semibold text-slate-400">Калории & Баланс</span>
+      <span id="percent-badge" class="text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400">0%</span>
+    </div>
+    
+    <div class="flex items-center justify-center my-3 relative">
+      <svg class="w-48 h-48 transform -rotate-90" viewBox="0 0 100 100">
+        <!-- Фон кольца -->
+        <circle cx="50" cy="50" r="40" stroke-width="7" class="ring-bg" fill="transparent" />
+        <!-- Кольцо калорий -->
+        <circle id="cal-circle" cx="50" cy="50" r="40" stroke-width="7" stroke-linecap="round" class="ring-cal" fill="transparent"
+                stroke-dasharray="251.2" stroke-dashoffset="251.2" />
+      </svg>
+      <div class="absolute inset-0 flex flex-col items-center justify-center text-center">
+        <span class="text-3xl font-extrabold text-white" id="eaten-cal">0</span>
+        <span class="text-xs text-slate-400 font-medium" id="target-cal-label">из 2000 ккал</span>
+      </div>
+    </div>
+
+    <!-- Индикаторы БЖУ -->
+    <div class="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-slate-700/60 text-center">
+      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+        <span class="text-[10px] uppercase font-semibold text-sky-400">Белки</span>
+        <p class="text-base font-bold text-white mt-0.5" id="val-protein">0 <span class="text-xs font-normal text-slate-400">/ 130г</span></p>
+      </div>
+      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+        <span class="text-[10px] uppercase font-semibold text-amber-400">Жиры</span>
+        <p class="text-base font-bold text-white mt-0.5" id="val-fat">0 <span class="text-xs font-normal text-slate-400">/ 65г</span></p>
+      </div>
+      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+        <span class="text-[10px] uppercase font-semibold text-purple-400">Углеводы</span>
+        <p class="text-base font-bold text-white mt-0.5" id="val-carbs">0 <span class="text-xs font-normal text-slate-400">/ 220г</span></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Водный трекер -->
+  <div class="glass-card rounded-3xl p-5 mb-5 shadow-xl">
+    <div class="flex items-center justify-between mb-3">
+      <div class="flex items-center gap-2">
+        <span class="text-lg">💧</span>
+        <div>
+          <h3 class="text-sm font-bold text-white">Водный баланс</h3>
+          <p class="text-xs text-slate-400" id="water-status">0 из 2000 мл</p>
+        </div>
+      </div>
+      <span class="text-xs font-bold text-sky-400" id="water-percent">0%</span>
+    </div>
+    
+    <!-- Прогресс воды -->
+    <div class="w-full bg-slate-800 h-3 rounded-full overflow-hidden mb-4">
+      <div id="water-bar" class="bg-sky-400 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+    </div>
+
+    <!-- Быстрые кнопки добавления воды -->
+    <div class="grid grid-cols-3 gap-2">
+      <button onclick="addWater(250)" class="py-2.5 rounded-xl bg-slate-800/80 active:bg-sky-500/20 active:border-sky-500 border border-slate-700 text-xs font-semibold text-slate-200 transition-all flex items-center justify-center gap-1">
+        +250 мл 🥤
+      </button>
+      <button onclick="addWater(350)" class="py-2.5 rounded-xl bg-slate-800/80 active:bg-sky-500/20 active:border-sky-500 border border-slate-700 text-xs font-semibold text-slate-200 transition-all flex items-center justify-center gap-1">
+        +350 мл 🥛
+      </button>
+      <button onclick="addWater(500)" class="py-2.5 rounded-xl bg-slate-800/80 active:bg-sky-500/20 active:border-sky-500 border border-slate-700 text-xs font-semibold text-slate-200 transition-all flex items-center justify-center gap-1">
+        +500 мл 🫗
+      </button>
+    </div>
+  </div>
+
+  <!-- Чек-ин сна и настроя -->
+  <div class="glass-card rounded-3xl p-5 mb-5 shadow-xl flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="w-10 h-10 rounded-2xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center text-xl">
+        ☀️
+      </div>
+      <div>
+        <h4 class="text-sm font-bold text-white">Настрой на день</h4>
+        <p class="text-xs text-slate-400" id="mood-label">Чек-ин готовности</p>
+      </div>
+    </div>
+    <div class="text-right">
+      <span class="text-lg font-extrabold text-emerald-400" id="mood-score">8/10</span>
+    </div>
+  </div>
+
+  <!-- Связь с тренером -->
+  <a href="https://t.me/VolkovaYasno?text=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82%2C%20%D1%83%20%D0%BC%D0%B5%D0%BD%D1%8F%20%D1%81%D0%B5%D0%B3%D0%BE%D0%B4%D0%BD%D1%8F%20%D0%BD%D0%B5%20%D0%BE%D1%87%D0%B5%D0%BD%D1%8C%20%D0%BE%D1%89%D1%83%D1%89%D0%B5%D0%BD%D0%B8%D1%8F%2C%20%D0%BD%D1%83%D0%B6%D0%BD%D0%B0%20%D1%81%20%D1%82%D0%BE%D0%B1%D0%BE%D0%B9%20%D0%B1%D0%B5%D1%81%D0%B5%D0%B4%D0%B0"
+     target="_blank"
+     class="block w-full py-4 rounded-2xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white font-bold text-center text-sm shadow-lg shadow-emerald-500/20 active:opacity-90 transition-all">
+    💬 Написать тренеру (@VolkovaYasno)
+  </a>
+
+  <script>
+    const tg = window.Telegram ? window.Telegram.WebApp : null;
+    if (tg) {
+      tg.expand();
+      tg.ready();
+    }
+
+    // Параметры из URL или Telegram
+    const urlParams = new URLSearchParams(window.location.search);
+    const userName = urlParams.get('name') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.first_name : 'Анастасия');
+    const eatenCal = parseInt(urlParams.get('cal')) || 1650;
+    const targetCal = parseInt(urlParams.get('target_cal')) || 2000;
+    const protein = parseInt(urlParams.get('p')) || 110;
+    const targetP = parseInt(urlParams.get('tp')) || 130;
+    const fat = parseInt(urlParams.get('f')) || 55;
+    const targetF = parseInt(urlParams.get('tf')) || 65;
+    const carbs = parseInt(urlParams.get('c')) || 180;
+    const targetC = parseInt(urlParams.get('tc')) || 220;
+    let waterMl = parseInt(urlParams.get('water')) || 1250;
+    const targetWater = 2000;
+
+    // Инициализация
+    document.getElementById('user-greeting').innerText = `Привет, ${userName}!`;
+    document.getElementById('eaten-cal').innerText = eatenCal;
+    document.getElementById('target-cal-label').innerText = `из ${targetCal} ккал`;
+    document.getElementById('val-protein').innerHTML = `${protein} <span class="text-xs font-normal text-slate-400">/ ${targetP}г</span>`;
+    document.getElementById('val-fat').innerHTML = `${fat} <span class="text-xs font-normal text-slate-400">/ ${targetF}г</span>`;
+    document.getElementById('val-carbs').innerHTML = `${carbs} <span class="text-xs font-normal text-slate-400">/ ${targetC}г</span>`;
+
+    // Анимация кольца калорий
+    const calPct = Math.min(1.0, eatenCal / targetCal);
+    const circle = document.getElementById('cal-circle');
+    const circumference = 2 * Math.PI * 40; // 251.2
+    const offset = circumference - (calPct * circumference);
+    circle.style.strokeDashoffset = offset;
+    document.getElementById('percent-badge').innerText = `${Math.round(calPct * 100)}%`;
+
+    function updateWaterUI() {
+      const pct = Math.min(100, Math.round((waterMl / targetWater) * 100));
+      document.getElementById('water-status').innerText = `${waterMl} из ${targetWater} мл`;
+      document.getElementById('water-percent').innerText = `${pct}%`;
+      document.getElementById('water-bar').style.width = `${pct}%`;
+    }
+    updateWaterUI();
+
+    function addWater(amount) {
+      waterMl += amount;
+      updateWaterUI();
+      if (tg) {
+        if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
+        // Отправка данных боту
+        tg.sendData(JSON.stringify({ action: 'add_water', amount: amount }));
+      }
+    }
+  </script>
+</body>
+</html>
