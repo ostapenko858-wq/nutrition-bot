@@ -22,8 +22,10 @@ from telegram import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
+    MenuButtonWebApp,
     ReplyKeyboardMarkup,
     Update,
+    WebAppInfo,
 )
 from telegram.constants import ParseMode
 from telegram.error import BadRequest
@@ -48,6 +50,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_TRANSCRIBE_MODEL = os.getenv("GEMINI_TRANSCRIBE_MODEL", "gemini-2.5-flash")
 TRAINER_CONTACT = os.getenv("TRAINER_CONTACT", "своему тренеру")
 TRAINER_USERNAME = os.getenv("TRAINER_USERNAME", "VolkovaYasno").lstrip("@")
+WEBAPP_URL = os.getenv("WEBAPP_URL", "https://ostapenko858-wq.github.io/nutrition-bot/").strip()
 
 if not TELEGRAM_TOKEN:
     raise RuntimeError(
@@ -1745,6 +1748,32 @@ async def summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
         InlineKeyboardButton("+350 мл 🥛", callback_data="add_water:350"),
         InlineKeyboardButton("+500 мл 🫗", callback_data="add_water:500"),
     ])
+    if WEBAPP_URL:
+        user_name = profile.get("name", "") if profile else ""
+        mood_score = checkin.get("readiness_score") if checkin else ""
+        mood_text = checkin.get("readiness") if checkin else ""
+        params = {
+            "cal": int(round(total_cal)),
+            "target_cal": int(round(target_cal or 2000)),
+            "p": int(round(total_p)),
+            "tp": int(round(tp or 110)),
+            "f": int(round(total_f)),
+            "tf": int(round(tf or 65)),
+            "c": int(round(total_c)),
+            "tc": int(round(tc or 210)),
+            "water": int(water),
+            "d": day,
+        }
+        if user_name:
+            params["name"] = user_name
+        if mood_score:
+            params["mood_score"] = mood_score
+        if mood_text:
+            params["mood_text"] = mood_text
+        user_webapp_url = f"{WEBAPP_URL}?{urllib.parse.urlencode(params)}"
+        summary_buttons.append([
+            InlineKeyboardButton("📱 Открыть Дневник (Web App)", web_app=WebAppInfo(url=user_webapp_url))
+        ])
     summary_buttons.append([
         InlineKeyboardButton("💬 Написать тренеру", url=get_trainer_url())
     ])
@@ -2602,9 +2631,9 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 # =============== MAIN ===============
 
 async def post_init(application):
-    """Регистрирует нативные команды в Telegram Menu Button."""
+    """Регистрирует нативные команды и MenuButton в Telegram."""
     try:
-        await application.bot.set_my_commands([
+        cmds = [
             BotCommand("summary", "📊 Итог дня и баланс"),
             BotCommand("checkin", "☀️ Чек-ин сна и настроя"),
             BotCommand("addfood", "🍽 Добавить еду"),
@@ -2613,10 +2642,27 @@ async def post_init(application):
             BotCommand("dayhistory", "📜 История за день"),
             BotCommand("trainer", "💬 Написать тренеру"),
             BotCommand("help", "❓ Справка по боту"),
-        ])
+        ]
+        await application.bot.set_my_commands(cmds)
+        await application.bot.set_my_commands(cmds, language_code="ru")
         logger.info("Нативные команды меню бота успешно зарегистрированы в Telegram")
     except Exception as e:
         logger.warning("Не удалось зарегистрировать команды меню бота: %s", e)
+
+    if WEBAPP_URL:
+        try:
+            await application.bot.set_chat_menu_button(
+                menu_button=MenuButtonWebApp(text="📱 Дневник", web_app=WebAppInfo(url=WEBAPP_URL))
+            )
+            logger.info("Кнопка MenuButtonWebApp успешно настроена: %s", WEBAPP_URL)
+        except Exception as e:
+            logger.warning("Не удалось настроить MenuButtonWebApp: %s", e)
+    else:
+        try:
+            from telegram import MenuButtonCommands
+            await application.bot.set_chat_menu_button(menu_button=MenuButtonCommands())
+        except Exception as e:
+            logger.warning("Не удалось настроить MenuButtonCommands: %s", e)
 
 
 def main():

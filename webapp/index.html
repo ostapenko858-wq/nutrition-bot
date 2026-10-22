@@ -24,10 +24,7 @@
       -webkit-tap-highlight-color: transparent;
     }
     .ring-bg { stroke: #1e293b; }
-    .ring-cal { stroke: #10b981; transition: stroke-dashoffset 0.8s ease-in-out; }
-    .ring-protein { stroke: #38bdf8; transition: stroke-dashoffset 0.8s ease-in-out; }
-    .ring-fat { stroke: #fbbf24; transition: stroke-dashoffset 0.8s ease-in-out; }
-    .ring-carbs { stroke: #c084fc; transition: stroke-dashoffset 0.8s ease-in-out; }
+    .ring-cal { stroke: #10b981; transition: stroke-dashoffset 0.8s ease-in-out, stroke 0.3s; }
     .glass-card {
       background: rgba(30, 41, 59, 0.75);
       backdrop-filter: blur(12px);
@@ -45,8 +42,8 @@
       </h1>
     </div>
     <div class="flex items-center gap-2">
-      <span class="px-3 py-1 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-        Demo Pro
+      <span class="px-3 py-1 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" id="sync-badge">
+        Синхронизировано
       </span>
     </div>
   </header>
@@ -72,19 +69,28 @@
       </div>
     </div>
 
-    <!-- Индикаторы БЖУ -->
+    <!-- Индикаторы БЖУ с цветными мини-барами -->
     <div class="grid grid-cols-3 gap-2 mt-4 pt-4 border-t border-slate-700/60 text-center">
-      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+      <div class="p-2.5 rounded-2xl bg-slate-800/50 border border-slate-700/40 flex flex-col justify-between">
         <span class="text-[10px] uppercase font-semibold text-sky-400">Белки</span>
-        <p class="text-base font-bold text-white mt-0.5" id="val-protein">0 <span class="text-xs font-normal text-slate-400">/ 130г</span></p>
+        <p class="text-base font-bold text-white my-1" id="val-protein">0 <span class="text-xs font-normal text-slate-400">/ 130г</span></p>
+        <div class="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
+          <div id="bar-protein" class="bg-sky-400 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+        </div>
       </div>
-      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+      <div class="p-2.5 rounded-2xl bg-slate-800/50 border border-slate-700/40 flex flex-col justify-between">
         <span class="text-[10px] uppercase font-semibold text-amber-400">Жиры</span>
-        <p class="text-base font-bold text-white mt-0.5" id="val-fat">0 <span class="text-xs font-normal text-slate-400">/ 65г</span></p>
+        <p class="text-base font-bold text-white my-1" id="val-fat">0 <span class="text-xs font-normal text-slate-400">/ 65г</span></p>
+        <div class="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
+          <div id="bar-fat" class="bg-amber-400 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+        </div>
       </div>
-      <div class="p-2 rounded-2xl bg-slate-800/50 border border-slate-700/40">
+      <div class="p-2.5 rounded-2xl bg-slate-800/50 border border-slate-700/40 flex flex-col justify-between">
         <span class="text-[10px] uppercase font-semibold text-purple-400">Углеводы</span>
-        <p class="text-base font-bold text-white mt-0.5" id="val-carbs">0 <span class="text-xs font-normal text-slate-400">/ 220г</span></p>
+        <p class="text-base font-bold text-white my-1" id="val-carbs">0 <span class="text-xs font-normal text-slate-400">/ 220г</span></p>
+        <div class="w-full bg-slate-700/50 h-1.5 rounded-full overflow-hidden">
+          <div id="bar-carbs" class="bg-purple-400 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+        </div>
       </div>
     </div>
   </div>
@@ -133,7 +139,7 @@
       </div>
     </div>
     <div class="text-right">
-      <span class="text-lg font-extrabold text-emerald-400" id="mood-score">8/10</span>
+      <span class="text-lg font-extrabold text-emerald-400" id="mood-score">—</span>
     </div>
   </div>
 
@@ -151,51 +157,137 @@
       tg.ready();
     }
 
-    // Параметры из URL или Telegram
+    // Текущая дата
+    const now = new Date();
+    const todayISO = now.toISOString().slice(0, 10);
+    const monthsRu = ["января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря"];
+    const weekdaysRu = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"];
+    document.getElementById('current-date').innerText = `${now.getDate()} ${monthsRu[now.getMonth()]}, ${weekdaysRu[now.getDay()]}`;
+
+    // Чтение параметров из URL
     const urlParams = new URLSearchParams(window.location.search);
-    const userName = urlParams.get('name') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.first_name : 'Анастасия');
-    const eatenCal = parseInt(urlParams.get('cal')) || 1650;
-    const targetCal = parseInt(urlParams.get('target_cal')) || 2000;
-    const protein = parseInt(urlParams.get('p')) || 110;
-    const targetP = parseInt(urlParams.get('tp')) || 130;
-    const fat = parseInt(urlParams.get('f')) || 55;
-    const targetF = parseInt(urlParams.get('tf')) || 65;
-    const carbs = parseInt(urlParams.get('c')) || 180;
-    const targetC = parseInt(urlParams.get('tc')) || 220;
-    let waterMl = parseInt(urlParams.get('water')) || 1250;
-    const targetWater = 2000;
+    const hasParams = urlParams.has('cal') || urlParams.has('target_cal');
 
-    // Инициализация
-    document.getElementById('user-greeting').innerText = `Привет, ${userName}!`;
-    document.getElementById('eaten-cal').innerText = eatenCal;
-    document.getElementById('target-cal-label').innerText = `из ${targetCal} ккал`;
-    document.getElementById('val-protein').innerHTML = `${protein} <span class="text-xs font-normal text-slate-400">/ ${targetP}г</span>`;
-    document.getElementById('val-fat').innerHTML = `${fat} <span class="text-xs font-normal text-slate-400">/ ${targetF}г</span>`;
-    document.getElementById('val-carbs').innerHTML = `${carbs} <span class="text-xs font-normal text-slate-400">/ ${targetC}г</span>`;
+    // Кэш из localStorage
+    const savedDataStr = localStorage.getItem('am_nutrition_state');
+    let savedData = null;
+    try {
+      if (savedDataStr) savedData = JSON.parse(savedDataStr);
+    } catch (e) {}
 
-    // Анимация кольца калорий
-    const calPct = Math.min(1.0, eatenCal / targetCal);
+    let data = {};
+
+    if (hasParams) {
+      // 1. Приоритет: свежие реальные данные из URL бота
+      data = {
+        date: urlParams.get('d') || todayISO,
+        name: urlParams.get('name') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.first_name : 'Анастасия'),
+        eatenCal: parseInt(urlParams.get('cal')) || 0,
+        targetCal: parseInt(urlParams.get('target_cal')) || 1350,
+        protein: parseInt(urlParams.get('p')) || 0,
+        targetP: parseInt(urlParams.get('tp')) || 95,
+        fat: parseInt(urlParams.get('f')) || 0,
+        targetF: parseInt(urlParams.get('tf')) || 42,
+        carbs: parseInt(urlParams.get('c')) || 0,
+        targetC: parseInt(urlParams.get('tc')) || 145,
+        waterMl: parseInt(urlParams.get('water')) || 0,
+        targetWater: 2000,
+        moodScore: urlParams.get('mood_score') || '',
+        moodText: urlParams.get('mood_text') || ''
+      };
+      // Сохраняем в localStorage на сегодня
+      localStorage.setItem('am_nutrition_state', JSON.stringify(data));
+    } else if (savedData && savedData.date === todayISO) {
+      // 2. Восстанавливаем сохранённые за сегодня данные (если открыли через меню бота)
+      data = savedData;
+    } else {
+      // 3. Новый день без параметров: начинаем с 0!
+      const userFirstName = (tg && tg.initDataUnsafe && tg.initDataUnsafe.user ? tg.initDataUnsafe.user.first_name : (savedData ? savedData.name : 'Анастасия'));
+      data = {
+        date: todayISO,
+        name: userFirstName,
+        eatenCal: 0,
+        targetCal: (savedData && savedData.targetCal) ? savedData.targetCal : 1350,
+        protein: 0,
+        targetP: (savedData && savedData.targetP) ? savedData.targetP : 95,
+        fat: 0,
+        targetF: (savedData && savedData.targetF) ? savedData.targetF : 42,
+        carbs: 0,
+        targetC: (savedData && savedData.targetC) ? savedData.targetC : 145,
+        waterMl: 0,
+        targetWater: 2000,
+        moodScore: '',
+        moodText: 'Чек-ин ещё не пройден'
+      };
+      localStorage.setItem('am_nutrition_state', JSON.stringify(data));
+    }
+
+    // Отрисовка значений
+    document.getElementById('user-greeting').innerText = `Привет, ${data.name}!`;
+    document.getElementById('eaten-cal').innerText = data.eatenCal;
+    document.getElementById('target-cal-label').innerText = `из ${data.targetCal} ккал`;
+
+    document.getElementById('val-protein').innerHTML = `${data.protein} <span class="text-xs font-normal text-slate-400">/ ${data.targetP}г</span>`;
+    document.getElementById('val-fat').innerHTML = `${data.fat} <span class="text-xs font-normal text-slate-400">/ ${data.targetF}г</span>`;
+    document.getElementById('val-carbs').innerHTML = `${data.carbs} <span class="text-xs font-normal text-slate-400">/ ${data.targetC}г</span>`;
+
+    // Мини-бары БЖУ
+    const pPct = Math.min(100, Math.round((data.protein / (data.targetP || 1)) * 100));
+    const fPct = Math.min(100, Math.round((data.fat / (data.targetF || 1)) * 100));
+    const cPct = Math.min(100, Math.round((data.carbs / (data.targetC || 1)) * 100));
+    document.getElementById('bar-protein').style.width = `${pPct}%`;
+    document.getElementById('bar-fat').style.width = `${fPct}%`;
+    document.getElementById('bar-carbs').style.width = `${cPct}%`;
+
+    // Анимация главного кольца калорий
+    const calPct = data.targetCal > 0 ? (data.eatenCal / data.targetCal) : 0;
+    const clampedPct = Math.min(1.0, calPct);
     const circle = document.getElementById('cal-circle');
     const circumference = 2 * Math.PI * 40; // 251.2
-    const offset = circumference - (calPct * circumference);
+    const offset = circumference - (clampedPct * circumference);
     circle.style.strokeDashoffset = offset;
-    document.getElementById('percent-badge').innerText = `${Math.round(calPct * 100)}%`;
 
+    const badge = document.getElementById('percent-badge');
+    const pctNum = Math.round(calPct * 100);
+    badge.innerText = `${pctNum}%`;
+    if (pctNum > 105) {
+      circle.style.stroke = "#f43f5e"; // коралл/красный при переборе
+      badge.className = "text-xs font-bold px-2 py-0.5 rounded-full bg-rose-500/20 text-rose-400";
+    } else {
+      circle.style.stroke = "#10b981";
+      badge.className = "text-xs font-bold px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-400";
+    }
+
+    // Чек-ин
+    if (data.moodScore) {
+      document.getElementById('mood-score').innerText = `${data.moodScore}/10`;
+      const score = parseInt(data.moodScore);
+      document.getElementById('mood-score').className = score >= 7 ? "text-lg font-extrabold text-emerald-400" : (score >= 4 ? "text-lg font-extrabold text-amber-400" : "text-lg font-extrabold text-rose-400");
+    } else {
+      document.getElementById('mood-score').innerText = "—";
+    }
+    if (data.moodText) {
+      document.getElementById('mood-label').innerText = data.moodText;
+    }
+
+    // Вода
     function updateWaterUI() {
-      const pct = Math.min(100, Math.round((waterMl / targetWater) * 100));
-      document.getElementById('water-status').innerText = `${waterMl} из ${targetWater} мл`;
+      const pct = Math.min(100, Math.round((data.waterMl / data.targetWater) * 100));
+      document.getElementById('water-status').innerText = `${data.waterMl} из ${data.targetWater} мл`;
       document.getElementById('water-percent').innerText = `${pct}%`;
       document.getElementById('water-bar').style.width = `${pct}%`;
     }
     updateWaterUI();
 
     function addWater(amount) {
-      waterMl += amount;
+      data.waterMl += amount;
       updateWaterUI();
+      localStorage.setItem('am_nutrition_state', JSON.stringify(data));
       if (tg) {
         if (tg.HapticFeedback) tg.HapticFeedback.impactOccurred('medium');
-        // Отправка данных боту
-        tg.sendData(JSON.stringify({ action: 'add_water', amount: amount }));
+        try {
+          tg.sendData(JSON.stringify({ action: 'add_water', amount: amount }));
+        } catch (e) {}
       }
     }
   </script>

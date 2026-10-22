@@ -7,20 +7,10 @@
     "height": 171.0,
     "goal": "Похудение",
     "bmr": 1812.75,
-    "target_calories": 1512.75
-  },
-  "633025546": {
-    "name": "Анастасия",
-    "age": 35,
-    "sex": "ж",
-    "weight": 56.0,
-    "height": 167.0,
-    "goal": "Поддержание",
-    "bmr": 1267.75,
-    "target_calories": 1267.75,
-    "target_protein": 89.60000000000001,
-    "target_fat": 56.0,
-    "target_carbs": 101.33749999999998
+    "target_calories": 1512.75,
+    "target_protein": 168.0,
+    "target_fat": 105.0,
+    "target_carbs": 113.5
   },
   "1023059493": {
     "name": "Ирина",
@@ -73,5 +63,29 @@
     "target_protein": 134.1,
     "target_fat": 59.6,
     "target_carbs": 90.0
+  },
+  "633025546": {
+    "name": "Анастасия",
+    "age": 36,
+    "sex": "ж",
+    "weight": 58.0,
+    "height": 167.0,
+    "activity_description": "умеренная активность (3–5 тренировок в неделю)",
+    "activity_factor": 1.55,
+    "target_weight": 53.0,
+    "health_conditions": "Нет",
+    "allergies": "Нет",
+    "lifestyle": "Сплю по 8 часов, стресс бывает ежедневно потому и занимаюсь бегом и йогой",
+    "months_to_goal": 2.0,
+    "goal": "Похудение",
+    "bmr": 1282.8,
+    "goal_type": "loss",
+    "maintenance_calories": 1988.3,
+    "target_calories": 1346.6,
+    "daily_deficit": 641.7,
+    "realistic_months": 2.0,
+    "target_protein": 95.4,
+    "target_fat": 42.4,
+    "target_carbs": 145.8
   }
 }
